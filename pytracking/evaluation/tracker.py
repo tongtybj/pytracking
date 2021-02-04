@@ -14,7 +14,8 @@ from ltr.data.bounding_box_utils import masks_to_bboxes
 from pytracking.evaluation.multi_object_wrapper import MultiObjectWrapper
 from pathlib import Path
 import torch
-
+import json
+from glob import glob
 
 _tracker_disp_colors = {1: (0, 255, 0), 2: (0, 0, 255), 3: (255, 0, 0),
                         4: (255, 255, 255), 5: (0, 0, 0), 6: (0, 255, 128),
@@ -226,6 +227,77 @@ class Tracker:
                 output.pop(key)
 
         return output
+
+    def run_images(self, imagefilepath, debug=None, visdom_info=None, save_results=False):
+        """Run the tracker with the continuous images.
+        args:
+            debug: Debug level.
+        """
+
+        params = self.get_parameters()
+
+        debug_ = debug
+        if debug is None:
+            debug_ = getattr(params, 'debug', 0)
+        params.debug = debug_
+
+        params.tracker_name = self.name
+        params.param_name = self.parameter_name
+        self._init_visdom(visdom_info, debug_)
+
+        multiobj_mode = getattr(params, 'multiobj_mode', getattr(self.tracker_class, 'multiobj_mode', 'default'))
+
+        if multiobj_mode == 'default':
+            tracker = self.create_tracker(params)
+            if hasattr(tracker, 'initialize_features'):
+                tracker.initialize_features()
+
+        elif multiobj_mode == 'parallel':
+            tracker = MultiObjectWrapper(self.tracker_class, params, self.visdom, fast_load=True)
+        else:
+            raise ValueError('Unknown multi object mode {}'.format(multiobj_mode))
+
+        output_boxes = []
+
+        images = glob(os.path.join(imagefilepath, '*.jp*'))
+        images = sorted(images, key=lambda x: int(x.split('/')[-1].split('.')[0]))
+
+        def _build_init_info(box):
+            return {'init_bbox': OrderedDict({1: box}), 'init_object_ids': [1, ], 'object_ids': [1, ],
+                    'sequence_object_ids': [1, ]}
+
+        result = []
+        first_frame = True
+        display_name = 'Display: ' + tracker.params.tracker_name
+        cv.namedWindow(display_name)
+
+        for img in images:
+            frame = cv.imread(img)
+            if first_frame:
+                try:
+                    init_rect = cv.selectROI(display_name, frame, False, False)
+                except:
+                    exit()
+                tracker.initialize(frame, _build_init_info(init_rect))
+                first_frame = False
+                result.append(init_rect)
+            else:
+                out = tracker.track(frame)
+                bbox = [int(s) for s in out['target_bbox'][1]]
+
+                cv.rectangle(frame, (bbox[0], bbox[1]),
+                              (bbox[0]+bbox[2], bbox[1]+bbox[3]),
+                              (0, 255, 0), 3)
+                cv.imshow(display_name, frame)
+                cv.waitKey(40)
+
+                result.append(bbox)
+
+        cv.destroyAllWindows()
+        if save_results:
+            filename= imagefilepath.split('/')[-1] + "_"  + tracker.params.tracker_name +  ".json"
+            with open(filename,  mode='w') as f:
+                json.dump(result, f)
 
     def run_video(self, videofilepath, optional_box=None, debug=None, visdom_info=None, save_results=False):
         """Run the tracker with the vieofile.
